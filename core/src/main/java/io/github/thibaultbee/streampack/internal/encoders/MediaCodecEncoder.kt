@@ -54,10 +54,16 @@ abstract class MediaCodecEncoder<T : Config>(
             info: MediaCodec.BufferInfo
         ) {
             synchronized(lock) {
-                if (isStopped) {
-                    return
-                }
-                if (isOnError) {
+                /**
+                 * Every output buffer has to go back to the codec, even when it is not used.
+                 * A buffer that is never released stalls the encoder; the video encoder then
+                 * stops consuming its input surface, the GL thread blocks forever in
+                 * dequeueBuffer and every stopStream() waits on it (ANR when called from the
+                 * main thread). This happened as soon as the endpoint failed (e.g. the RTMP
+                 * server closed the connection).
+                 */
+                if (isStopped || isOnError) {
+                    releaseOutputBufferQuietly(codec, index)
                     return
                 }
 
@@ -81,8 +87,6 @@ abstract class MediaCodecEncoder<T : Config>(
                                 )
                             }
                         }
-
-                        mediaCodec?.releaseOutputBuffer(index, false)
                     }
                         ?: reportError(StreamPackError(UnsupportedOperationException("MediaCodecEncoder: can't get output buffer")))
                 } catch (e: IllegalStateException) {
@@ -91,6 +95,11 @@ abstract class MediaCodecEncoder<T : Config>(
                 } catch (e: StreamPackError) {
                     isOnError = true
                     reportError(e)
+                } catch (e: Exception) {
+                    isOnError = true
+                    reportError(StreamPackError(e))
+                } finally {
+                    releaseOutputBufferQuietly(codec, index)
                 }
             }
         }
@@ -140,6 +149,14 @@ abstract class MediaCodecEncoder<T : Config>(
 
         override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
             reportError(StreamPackError(e))
+        }
+    }
+
+    private fun releaseOutputBufferQuietly(codec: MediaCodec, index: Int) {
+        try {
+            codec.releaseOutputBuffer(index, false)
+        } catch (e: IllegalStateException) {
+            // Codec already stopped or released: nothing to give back.
         }
     }
 
